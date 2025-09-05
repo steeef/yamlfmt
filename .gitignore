@@ -2,6 +2,7 @@
 .yamlfmt
 !integrationtest/**/.yamlfmt
 tmp
+test_*.yaml
 
 # Goreleaser build folder
 dist/
