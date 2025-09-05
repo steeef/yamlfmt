@@ -96,6 +96,7 @@ func run() error {
 func getFullRegistry() *yamlfmt.Registry {
 	registry := yamlfmt.NewFormatterRegistry(&basic.BasicFormatterFactory{})
 	registry.Add(&kyaml.KYAMLFormatterFactory{})
+	registry.Add(&basic.PreserveBackslashFormatterFactory{})
 	return registry
 }
 
