@@ -81,5 +81,7 @@ func run() error {
 }
 
 func getFullRegistry() *yamlfmt.Registry {
-	return yamlfmt.NewFormatterRegistry(&basic.BasicFormatterFactory{})
+	registry := yamlfmt.NewFormatterRegistry(&basic.BasicFormatterFactory{})
+	registry.Add(&basic.PreserveBackslashFormatterFactory{})
+	return registry
 }
