@@ -34,7 +34,7 @@ var backslashContinuationRegex = regexp.MustCompile(`(?m)^(\s*[^:\n]+:\s*)"([^"\
 // BackslashPreservation holds info about a preserved string
 type BackslashPreservation struct {
 	Placeholder string
-	Original    string
+	OriginalValue string  // Just the value part, not the entire line
 	Indent      string
 }
 
@@ -81,10 +81,13 @@ func (f *PreserveBackslashFormatter) preprocessBackslashContinuations(content []
 			// Generate unique placeholder
 			placeholder := f.generatePlaceholder()
 
+			// Extract just the value part from the original string
+			originalValue := f.extractValueFromBackslashString(originalString)
+
 			// Store preservation info
 			preservations = append(preservations, BackslashPreservation{
 				Placeholder: placeholder,
-				Original:    originalString,
+				OriginalValue: originalValue,
 				Indent:      match.indent,
 			})
 
@@ -160,6 +163,25 @@ func (f *PreserveBackslashFormatter) generatePlaceholder() string {
 	return fmt.Sprintf("__YAMLFMT_BACKSLASH_%x__", b)
 }
 
+// extractValueFromBackslashString extracts just the quoted value from a multi-line backslash string
+func (f *PreserveBackslashFormatter) extractValueFromBackslashString(originalString string) string {
+	lines := strings.Split(originalString, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+
+	// Find where the quoted value starts in the first line
+	firstLine := lines[0]
+	quoteIndex := strings.Index(firstLine, `"`)
+	if quoteIndex == -1 {
+		return ""
+	}
+
+	// Extract everything from the quote onwards
+	lines[0] = firstLine[quoteIndex:]
+	return strings.Join(lines, "\n")
+}
+
 // postprocessBackslashContinuations restores original backslash-continued strings from placeholders
 func (f *PreserveBackslashFormatter) postprocessBackslashContinuations(formatted []byte, preservations []BackslashPreservation) []byte {
 	result := string(formatted)
@@ -170,8 +192,8 @@ func (f *PreserveBackslashFormatter) postprocessBackslashContinuations(formatted
 		placeholderPattern := `"` + regexp.QuoteMeta(preservation.Placeholder) + `"`
 		pattern := regexp.MustCompile(placeholderPattern)
 
-		// Replace with the original multi-line string
-		result = pattern.ReplaceAllString(result, preservation.Original)
+		// Replace with just the original value part
+		result = pattern.ReplaceAllString(result, preservation.OriginalValue)
 	}
 
 	return []byte(result)
