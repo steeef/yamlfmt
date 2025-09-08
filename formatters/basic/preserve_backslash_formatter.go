@@ -1,15 +1,10 @@
 package basic
 
 import (
-	"bytes"
-	"context"
-	"errors"
-	"io"
+	"crypto/rand"
+	"fmt"
 	"regexp"
 	"strings"
-
-	"github.com/google/yamlfmt"
-	"github.com/google/yamlfmt/pkg/yaml"
 )
 
 const PreserveBackslashFormatterType string = "preserve_backslash"
@@ -19,150 +14,151 @@ type PreserveBackslashFormatter struct {
 	*BasicFormatter
 }
 
-// Regex to detect strings with backslash continuation
-var backslashContinuationRegex = regexp.MustCompile(`\\$`)
+// Regex to detect backslash-continued strings in YAML values
+var backslashContinuationRegex = regexp.MustCompile(`(?m)^(\s*[^:\n]+:\s*)"([^"\n]*\\\s*)$`)
+
+// BackslashPreservation holds info about a preserved string
+type BackslashPreservation struct {
+	Placeholder string
+	Original    string
+	Indent      string
+}
 
 func (f *PreserveBackslashFormatter) Type() string {
 	return PreserveBackslashFormatterType
 }
 
 func (f *PreserveBackslashFormatter) Format(input []byte) ([]byte, error) {
-	// First, detect strings with backslash continuation
-	preserveRanges := f.detectBackslashContinuedStrings(input)
-
-	// Store original for reference
-	originalLines := strings.Split(string(input), "\n")
-
-	// Run all features with BeforeActions
-	ctx := context.Background()
-	ctx, yamlContent, err := f.Features.ApplyFeatures(ctx, input, yamlfmt.FeatureApplyBefore)
+	// Text-level approach: detect and replace backslash continuations with placeholders
+	modifiedInput, preservations, err := f.preprocessBackslashContinuations(input)
 	if err != nil {
 		return nil, err
 	}
 
-	// Format the yaml content
-	reader := bytes.NewReader(yamlContent)
-	decoder := f.getNewDecoder(reader)
-	documents := []yaml.Node{}
-	for {
-		var docNode yaml.Node
-		err := decoder.Decode(&docNode)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return nil, err
-		}
-		documents = append(documents, docNode)
-	}
-
-	if len(documents) == 0 {
-		return input, nil
-	}
-
-	// Run all YAML features but preserve backslash-continued strings
-	for _, d := range documents {
-		if err := f.applyFeaturesWithPreservation(d, preserveRanges); err != nil {
-			return nil, err
-		}
-	}
-
-	// Use custom encoder that respects preservation
-	var b bytes.Buffer
-	e := f.getCustomEncoder(&b, preserveRanges, originalLines)
-	for _, doc := range documents {
-		err := e.Encode(&doc)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Run all features with AfterActions
-	_, resultYaml, err := f.Features.ApplyFeatures(ctx, b.Bytes(), yamlfmt.FeatureApplyAfter)
+	// Apply standard basic formatting to the modified input
+	formatted, err := f.BasicFormatter.Format(modifiedInput)
 	if err != nil {
 		return nil, err
 	}
 
-	return resultYaml, nil
+	// Post-process: restore original backslash continuations
+	result := f.postprocessBackslashContinuations(formatted, preservations)
+	return result, nil
 }
 
-// StringRange represents a range in the original text that should be preserved
-type StringRange struct {
-	StartLine int
-	EndLine   int
-	Value     string
-}
+// preprocessBackslashContinuations detects backslash-continued strings and replaces them with placeholders
+func (f *PreserveBackslashFormatter) preprocessBackslashContinuations(content []byte) ([]byte, []BackslashPreservation, error) {
+	input := string(content)
+	var preservations []BackslashPreservation
 
-func (f *PreserveBackslashFormatter) detectBackslashContinuedStrings(content []byte) []StringRange {
-	lines := strings.Split(string(content), "\n")
-	var ranges []StringRange
+	// Find all backslash-continued multi-line strings
+	lines := strings.Split(input, "\n")
+	modifiedLines := make([]string, len(lines))
+	copy(modifiedLines, lines)
 
-	for i, line := range lines {
-		// Look for quoted strings with backslash at end
-		trimmed := strings.TrimSpace(line)
-		if strings.Contains(trimmed, `"\`) {
-			// Find the start and end of this multi-line string
-			startLine := i
-			endLine := i
-			var valueLines []string
-			valueLines = append(valueLines, line)
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
 
-			// Look ahead for continuation lines
-			for j := i + 1; j < len(lines); j++ {
-				nextLine := lines[j]
-				valueLines = append(valueLines, nextLine)
-				endLine = j
+		// Look for lines that start a backslash-continued string
+		if match := f.findBackslashContinuationStart(line); match != nil {
+			// Extract the complete multi-line string
+			originalString, endLine := f.extractBackslashContinuedString(lines, i)
 
-				// Check if this line ends the string (ends with quote, not backslash-quote)
-				if strings.HasSuffix(strings.TrimSpace(nextLine), `"`) &&
-				   !strings.HasSuffix(strings.TrimSpace(nextLine), `\"`) {
-					break
-				}
-			}
+			// Generate unique placeholder
+			placeholder := f.generatePlaceholder()
 
-			ranges = append(ranges, StringRange{
-				StartLine: startLine,
-				EndLine:   endLine,
-				Value:     strings.Join(valueLines, "\n"),
+			// Store preservation info
+			preservations = append(preservations, BackslashPreservation{
+				Placeholder: placeholder,
+				Original:    originalString,
+				Indent:      match.indent,
 			})
+
+			// Replace the multi-line string with placeholder in modified content
+			modifiedLines[i] = match.prefix + `"` + placeholder + `"`
+
+			// Clear the continuation lines
+			for j := i + 1; j <= endLine; j++ {
+				modifiedLines[j] = ""
+			}
+
+			// Skip to after the end of this multi-line string
+			i = endLine
 		}
 	}
 
-	return ranges
+	// Remove empty lines that were cleared
+	var finalLines []string
+	for _, line := range modifiedLines {
+		if line != "" || len(finalLines) == 0 || finalLines[len(finalLines)-1] != "" {
+			finalLines = append(finalLines, line)
+		}
+	}
+
+	return []byte(strings.Join(finalLines, "\n")), preservations, nil
 }
 
-func (f *PreserveBackslashFormatter) applyFeaturesWithPreservation(node yaml.Node, preserveRanges []StringRange) error {
-	// Apply features but skip string nodes that should be preserved
-	return f.YAMLFeatures.ApplyFeatures(node)
+// BackslashMatch represents a matched backslash continuation pattern
+type BackslashMatch struct {
+	prefix string
+	indent string
 }
 
-func (f *PreserveBackslashFormatter) getCustomEncoder(buf *bytes.Buffer, preserveRanges []StringRange, originalLines []string) *yaml.Encoder {
-	e := yaml.NewEncoder(buf)
-	e.SetIndent(f.Config.Indent)
+// findBackslashContinuationStart checks if a line starts a backslash-continued string
+func (f *PreserveBackslashFormatter) findBackslashContinuationStart(line string) *BackslashMatch {
+	// Pattern: key: "value\   (with potential whitespace after backslash)
+	pattern := regexp.MustCompile(`^(\s*)([^:]+:\s*)"([^"]*\\\s*)$`)
+	matches := pattern.FindStringSubmatch(line)
+	if len(matches) != 4 {
+		return nil
+	}
+	return &BackslashMatch{
+		prefix: matches[1] + matches[2], // indent + key + colon + space
+		indent: matches[1],              // just the indent
+	}
+}
 
-	// Don't set width for preserved strings - this is the key change
-	if len(preserveRanges) == 0 && f.Config.LineLength > 0 {
-		e.SetWidth(f.Config.LineLength)
+// extractBackslashContinuedString extracts the complete multi-line backslash-continued string
+func (f *PreserveBackslashFormatter) extractBackslashContinuedString(lines []string, startLine int) (string, int) {
+	var stringLines []string
+	stringLines = append(stringLines, lines[startLine])
+
+	endLine := startLine
+	for i := startLine + 1; i < len(lines); i++ {
+		line := lines[i]
+		stringLines = append(stringLines, line)
+		endLine = i
+
+		// Check if this line ends the string (ends with quote, not backslash-quote)
+		trimmed := strings.TrimSpace(line)
+		if strings.HasSuffix(trimmed, `"`) && !strings.HasSuffix(trimmed, `\"`) {
+			break
+		}
 	}
 
-	if f.Config.LineEnding == yamlfmt.LineBreakStyleCRLF {
-		e.SetLineBreakStyle(yaml.LineBreakStyleCRLF)
+	return strings.Join(stringLines, "\n"), endLine
+}
+
+// generatePlaceholder creates a unique placeholder token
+func (f *PreserveBackslashFormatter) generatePlaceholder() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return fmt.Sprintf("__YAMLFMT_BACKSLASH_%x__", b)
+}
+
+// postprocessBackslashContinuations restores original backslash-continued strings from placeholders
+func (f *PreserveBackslashFormatter) postprocessBackslashContinuations(formatted []byte, preservations []BackslashPreservation) []byte {
+	result := string(formatted)
+
+	// Replace each placeholder with its original backslash-continued string
+	for _, preservation := range preservations {
+		// Find the placeholder in the formatted output
+		placeholderPattern := `"` + regexp.QuoteMeta(preservation.Placeholder) + `"`
+		pattern := regexp.MustCompile(placeholderPattern)
+
+		// Replace with the original multi-line string
+		result = pattern.ReplaceAllString(result, preservation.Original)
 	}
 
-	e.SetExplicitDocumentStart(f.Config.IncludeDocumentStart)
-	e.SetAssumeBlockAsLiteral(f.Config.ScanFoldedAsLiteral)
-	e.SetIndentlessBlockSequence(f.Config.IndentlessArrays)
-	e.SetDropMergeTag(f.Config.DropMergeTag)
-	e.SetPadLineComments(f.Config.PadLineComments)
-
-	if f.Config.ArrayIndent > 0 {
-		e.SetArrayIndent(f.Config.ArrayIndent)
-	}
-	e.SetIndentRootArray(f.Config.IndentRootArray)
-
-	if !f.Config.DisableAliasKeyCorrection {
-		e.SetCorrectAliasKeys(true)
-	}
-
-	return e
+	return []byte(result)
 }
