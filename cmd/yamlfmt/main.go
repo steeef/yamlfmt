@@ -19,16 +19,18 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/debug"
 
 	"github.com/google/yamlfmt"
 	"github.com/google/yamlfmt/command"
 	"github.com/google/yamlfmt/formatters/basic"
+	"github.com/google/yamlfmt/formatters/kyaml"
 	"github.com/google/yamlfmt/internal/logger"
 )
 
 var (
-	version = "dev"
-	commit  = "none"
+	version = ""
+	commit  = ""
 )
 
 func main() {
@@ -44,7 +46,12 @@ func run() error {
 	flag.Parse()
 
 	if *flagVersion {
-		fmt.Printf("yamlfmt %s (%s)\n", version, commit)
+		currentVersion, currentCommit := getVersion()
+		versionMessage := fmt.Sprintf("yamlfmt %s", currentVersion)
+		if currentCommit != "" {
+			versionMessage += fmt.Sprintf(" (%s)", currentCommit)
+		}
+		fmt.Println(versionMessage)
 		return nil
 	}
 
@@ -69,6 +76,12 @@ func run() error {
 		if err != nil {
 			return err
 		}
+	} else if len(os.Args) == 1 {
+		// If the user doesn't have a yamlfmt config and didn't provide
+		// any arguments, the command is destined to no-op. Provide the
+		// default help message to indicate proper usage.
+		flag.Usage()
+		return nil
 	}
 
 	commandConfig, err := makeCommandConfigFromData(configData)
@@ -81,5 +94,25 @@ func run() error {
 }
 
 func getFullRegistry() *yamlfmt.Registry {
-	return yamlfmt.NewFormatterRegistry(&basic.BasicFormatterFactory{})
+	registry := yamlfmt.NewFormatterRegistry(&basic.BasicFormatterFactory{})
+	registry.Add(&kyaml.KYAMLFormatterFactory{})
+	registry.Add(&basic.PreserveBackslashFormatterFactory{})
+	return registry
+}
+
+func getVersion() (string, string) {
+	// If version was set via ldflags, return that.
+	if version != "" {
+		return version, commit
+	}
+
+	buildInfo, ok := debug.ReadBuildInfo()
+	// If buildinfo can't be read, return default values.
+	if !ok {
+		return "dev", ""
+	}
+
+	// Otherwise read the version from buildInfo (this is to cover
+	// the go install usecase).
+	return buildInfo.Main.Version, ""
 }
