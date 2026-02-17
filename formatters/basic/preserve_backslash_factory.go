@@ -25,7 +25,7 @@ func (f *PreserveBackslashFormatterFactory) Type() string {
 	return PreserveBackslashFormatterType
 }
 
-func (f *PreserveBackslashFormatterFactory) NewFormatter(configData map[string]interface{}) (yamlfmt.Formatter, error) {
+func (f *PreserveBackslashFormatterFactory) NewFormatter(configData map[string]any) (yamlfmt.Formatter, error) {
 	config := DefaultConfig()
 	if configData != nil {
 		err := mapstructure.Decode(configData, &config)
@@ -33,14 +33,11 @@ func (f *PreserveBackslashFormatterFactory) NewFormatter(configData map[string]i
 			return nil, err
 		}
 	}
-
-	basicFormatter := &BasicFormatter{
-		Config:       config,
-		Features:     ConfigureFeaturesFromConfig(config),
-		YAMLFeatures: ConfigureYAMLFeaturesFromConfig(config),
+	basicFormatter, err := newFormatter(config)
+	if err != nil {
+		return nil, err
 	}
-
 	return &PreserveBackslashFormatter{
-		BasicFormatter: basicFormatter,
+		BasicFormatter: basicFormatter.(*BasicFormatter),
 	}, nil
 }
